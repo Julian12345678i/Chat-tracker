@@ -7,6 +7,11 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext
 
 
+# Where the public server lives. For testing on your own PC use "127.0.0.1" and 5000.
+DEFAULT_HOST = "thomas.proxy.rlwy.net"
+DEFAULT_PORT = 22078
+
+
 class ChatApp:
     def __init__(self, root):
         self.root = root
@@ -36,12 +41,12 @@ class ChatApp:
 
         tk.Label(f, text="Server address").pack(anchor="w")
         self.host_entry = tk.Entry(f, font=("Segoe UI", 11))
-        self.host_entry.insert(0, "127.0.0.1")
+        self.host_entry.insert(0, DEFAULT_HOST)
         self.host_entry.pack(fill="x", pady=(0, 10))
 
         tk.Label(f, text="Port").pack(anchor="w")
         self.port_entry = tk.Entry(f, font=("Segoe UI", 11))
-        self.port_entry.insert(0, "5000")
+        self.port_entry.insert(0, str(DEFAULT_PORT))
         self.port_entry.pack(fill="x", pady=(0, 10))
 
         tk.Label(f, text="Username").pack(anchor="w")
