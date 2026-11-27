@@ -202,11 +202,11 @@ def handle_client(conn, addr):
                 print(f"[JOINED] {username}")
 
             elif kind == "typing":
-                broadcast({
-                    "type": "typing",
-                    "from": username,
-                    "typing": bool(msg.get("typing"))
-                }, exclude=username)
+        broadcast({
+            "type": "typing",
+            "from": username,
+            "typing": bool(msg.get("typing"))
+        }, exclude=username)
 
                 with clients_lock:
                     was_muted = mute_until.get(username, 0) > now
