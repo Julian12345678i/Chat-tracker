@@ -4,6 +4,7 @@ import re
 import socket
 import threading
 import time
+import secrets
 
 HOST = "0.0.0.0"
 PORT = 5000
@@ -11,6 +12,11 @@ PORT = 5000
 clients = {}
 strikes = {}  # username -> number of times they used blocked words
 mute_until = {}  # username -> time (seconds since epoch) when they can type again
+# UDP typing indicator
+session_tokens = {}  # username -> authentication token
+udp_clients = {}     # username -> UDP address
+
+udp_lock = threading.Lock()
 
 # Mute settings: strike 1 = 1 minute, strike 2 = 2 minutes, ... capped at 10 minutes
 MUTE_STEP_SECONDS = 60
@@ -73,6 +79,75 @@ def broadcast(message, exclude=None):
             except OSError:
                 pass
 
+def handle_udp(udp_socket):
+    print("[UDP] Typing indicator listening...")
+
+    while True:
+        try:
+            data, address = udp_socket.recvfrom(2048)
+
+            try:
+                msg = json.loads(data.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+
+            kind = msg.get("type")
+            username = msg.get("username")
+
+            # Register a user's UDP connection
+            if kind == "udp_hello":
+                token = msg.get("token")
+
+                with clients_lock:
+                    valid = (
+                        username in clients
+                        and session_tokens.get(username) == token
+                    )
+
+                if not valid:
+                    continue
+
+                with udp_lock:
+                    udp_clients[username] = address
+
+                udp_socket.sendto(
+                    json.dumps({"type": "udp_ok"}).encode("utf-8"),
+                    address
+                )
+
+                print(f"[UDP] {username} registered")
+                continue
+
+            # Receive and forward typing status
+            if kind == "typing":
+                with udp_lock:
+                    registered = udp_clients.get(username)
+
+                    if registered != address:
+                        continue
+
+                    recipients = [
+                        (name, addr)
+                        for name, addr in udp_clients.items()
+                        if name != username
+                    ]
+
+                notification = {
+                    "type": "typing",
+                    "from": username,
+                    "typing": bool(msg.get("typing"))
+                }
+
+                payload = json.dumps(notification).encode("utf-8")
+
+                for _, recipient_address in recipients:
+                    try:
+                        udp_socket.sendto(payload, recipient_address)
+                    except OSError:
+                        pass
+
+        except OSError as error:
+            print(f"[UDP ERROR] {error}")
 
 def handle_client(conn, addr):
     username = None
@@ -108,7 +183,17 @@ def handle_client(conn, addr):
                     send_json(conn, {"type": "error", "text": "Username already taken"})
                     continue
                 username = name
-                send_json(conn, {"type": "info", "text": f"Welcome, {username}!"})
+
+                token = secrets.token_hex(16)
+
+                with clients_lock:
+                    session_tokens[username] = token
+
+                send_json(conn, {
+                    "type": "info",
+                    "text": f"Welcome, {username}!",
+                    "token": token
+                })
                 left = math.ceil(mute_until.get(username, 0) - time.time())
                 if left > 0:
                     send_json(conn, {"type": "muted", "seconds": left,
@@ -116,9 +201,12 @@ def handle_client(conn, addr):
                 broadcast({"type": "info", "text": f"{username} joined the chat"}, exclude=username)
                 print(f"[JOINED] {username}")
 
-            elif kind == "message":
-                clean, bad = censor(msg.get("text", ""))
-                now = time.time()
+            elif kind == "typing":
+                broadcast({
+                    "type": "typing",
+                    "from": username,
+                    "typing": bool(msg.get("typing"))
+                }, exclude=username)
 
                 with clients_lock:
                     was_muted = mute_until.get(username, 0) > now
@@ -168,30 +256,55 @@ def handle_client(conn, addr):
         if username:
             with clients_lock:
                 clients.pop(username, None)
+                session_tokens.pop(username, None)
+
+            with udp_lock:
+                udp_clients.pop(username, None)
             broadcast({"type": "info", "text": f"{username} left the chat"})
             print(f"[LEFT] {username}")
         conn.close()
         print(f"[DISCONNECTED] {addr}")
 
-
 def main():
+    # TCP server
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen()
     server.settimeout(1.0)
-    print(f"[SERVER] Listening on port {PORT}... (press Ctrl+C to stop)")
+
+    # UDP server
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_socket.bind((HOST, PORT))
+
+    threading.Thread(
+        target=handle_udp,
+        args=(udp_socket,),
+        daemon=True
+    ).start()
+
+    print(f"[TCP] Listening on port {PORT}")
+    print(f"[UDP] Listening on port {PORT}")
+
     try:
         while True:
             try:
                 conn, addr = server.accept()
             except socket.timeout:
                 continue
-            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+
+            threading.Thread(
+                target=handle_client,
+                args=(conn, addr),
+                daemon=True
+            ).start()
+
     except KeyboardInterrupt:
         print("\n[SERVER] Shutting down.")
+
     finally:
         server.close()
+        udp_socket.close()
 
 
 if __name__ == "__main__":
