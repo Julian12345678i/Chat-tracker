@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import socket
 import sys
@@ -14,6 +14,8 @@ def send_json(sock, message):
 
 def show(msg):
     kind = msg.get("type")
+    if kind == "typing":
+        return  # typing notices are only shown by the GUI client
     if kind == "message":
         flag = " [FLAGGED]" if msg.get("flagged") else ""
         print(f"\r[{msg.get('from')}{flag}] {msg.get('text')}")

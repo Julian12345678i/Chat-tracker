@@ -1,12 +1,14 @@
 import json
 import math
+import os
 import re
+import secrets
 import socket
 import threading
 import time
 
 HOST = "0.0.0.0"
-PORT = 5000
+PORT = int(os.environ.get("PORT", 5000))  # Railway can set PORT; default 5000 on your PC
 
 clients = {}
 strikes = {}  # username -> number of times they used blocked words
@@ -17,6 +19,15 @@ MUTE_STEP_SECONDS = 60
 MAX_MUTE_SECONDS = 600
 clients_lock = threading.Lock()
 
+# ---------- UDP typing indicator ----------
+# Typing notices are tiny and unimportant if one is lost, which makes UDP a good fit:
+# no connection, no waiting for confirmation. If a client's UDP packets can't get through
+# (for example on Railway, which only offers a public TCP proxy), the same notice is
+# sent over the normal TCP connection instead.
+udp_sock = None
+udp_addrs = {}   # username -> (ip, port) of their registered UDP address
+udp_tokens = {}  # username -> secret token given at join, so nobody can fake a registration
+
 # ---------- Word filter ----------
 # Add or remove words here. Insults are included too.
 BAD_WORDS = [
@@ -25,8 +36,24 @@ BAD_WORDS = [
     "loser", "retard", "trash", "ugly", "fool",
 ]
 
+# Racist slurs and phrases. Add more here if you spot any that slip through.
+RACIST_WORDS = [
+    "nigger", "nigga", "niggaz", "chink", "gook", "spic", "wetback", "kike",
+    "coon", "darkie", "towelhead", "raghead", "beaner", "paki", "jap", "honky",
+    "zipperhead", "porch monkey", "sand nigger",
+    "go back to africa", "go back to your country",
+]
+
+BAD_WORDS = BAD_WORDS + RACIST_WORDS
+
+
+def _to_regex(word):
+    # Phrases: allow any amount of whitespace between the words
+    return r"\s+".join(re.escape(part) for part in word.split())
+
+
 _pattern = re.compile(
-    r"\b(" + "|".join(sorted(map(re.escape, BAD_WORDS), key=len, reverse=True))
+    r"\b(" + "|".join(sorted(map(_to_regex, BAD_WORDS), key=len, reverse=True))
     + r")(s|es|ed|er|ers|ing|in|y)?\b",
     re.IGNORECASE,
 )
@@ -74,6 +101,63 @@ def broadcast(message, exclude=None):
                 pass
 
 
+def send_udp(addr, message):
+    try:
+        udp_sock.sendto(json.dumps(message).encode("utf-8"), addr)
+    except (OSError, AttributeError):
+        pass
+
+
+def relay_typing(username, is_typing):
+    """Tell everyone else that username started or stopped typing."""
+    message = {"type": "typing", "from": username, "typing": is_typing}
+    with clients_lock:
+        targets = [(n, c, udp_addrs.get(n)) for n, c in clients.items() if n != username]
+    for _name, conn, udp_addr in targets:
+        if udp_addr:
+            send_udp(udp_addr, message)      # fast path: UDP
+        else:
+            try:
+                send_json(conn, message)     # fallback: normal TCP connection
+            except OSError:
+                pass
+
+
+def is_muted(username):
+    with clients_lock:
+        return mute_until.get(username, 0) > time.time()
+
+
+def udp_loop():
+    """Receives UDP datagrams: registrations and typing notices."""
+    while True:
+        try:
+            data, addr = udp_sock.recvfrom(2048)
+        except OSError:
+            break
+        try:
+            msg = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(msg, dict):
+            continue
+        kind = msg.get("type")
+        name = str(msg.get("username", "")).strip()
+
+        with clients_lock:
+            known = name in clients
+            registered = udp_addrs.get(name)
+            token_ok = known and msg.get("token") == udp_tokens.get(name)
+
+        if kind == "udp_hello" and token_ok:
+            with clients_lock:
+                udp_addrs[name] = addr
+            send_udp(addr, {"type": "udp_ok"})
+            print(f"[UDP] {name} registered {addr}")
+        elif kind == "typing" and known and registered == addr and not is_muted(name):
+            relay_typing(name, bool(msg.get("typing")))
+
+
 def handle_client(conn, addr):
     username = None
     print(f"[NEW CONNECTION] {addr}")
@@ -108,13 +192,20 @@ def handle_client(conn, addr):
                     send_json(conn, {"type": "error", "text": "Username already taken"})
                     continue
                 username = name
-                send_json(conn, {"type": "info", "text": f"Welcome, {username}!"})
+                token = secrets.token_hex(8)
+                with clients_lock:
+                    udp_tokens[username] = token
+                send_json(conn, {"type": "info", "text": f"Welcome, {username}!", "token": token})
                 left = math.ceil(mute_until.get(username, 0) - time.time())
                 if left > 0:
                     send_json(conn, {"type": "muted", "seconds": left,
                                      "text": f"You are still muted for {describe(left)}."})
                 broadcast({"type": "info", "text": f"{username} joined the chat"}, exclude=username)
                 print(f"[JOINED] {username}")
+
+            elif kind == "typing":
+                if not is_muted(username):
+                    relay_typing(username, bool(msg.get("typing")))
 
             elif kind == "message":
                 clean, bad = censor(msg.get("text", ""))
@@ -168,6 +259,9 @@ def handle_client(conn, addr):
         if username:
             with clients_lock:
                 clients.pop(username, None)
+                udp_addrs.pop(username, None)
+                udp_tokens.pop(username, None)
+            relay_typing(username, False)
             broadcast({"type": "info", "text": f"{username} left the chat"})
             print(f"[LEFT] {username}")
         conn.close()
@@ -180,7 +274,15 @@ def main():
     server.bind((HOST, PORT))
     server.listen()
     server.settimeout(1.0)
+
+    # UDP socket on the same port number (TCP and UDP ports are separate, so this is allowed)
+    global udp_sock
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.bind((HOST, PORT))
+    threading.Thread(target=udp_loop, daemon=True).start()
+
     print(f"[SERVER] Listening on port {PORT}... (press Ctrl+C to stop)")
+    print(f"[SERVER] UDP typing listener on port {PORT}")
     try:
         while True:
             try:
@@ -192,6 +294,7 @@ def main():
         print("\n[SERVER] Shutting down.")
     finally:
         server.close()
+        udp_sock.close()
 
 
 if __name__ == "__main__":
