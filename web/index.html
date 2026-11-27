@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OG Chat</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/app.js" defer></script>
+</head>
+<body>
+    <h1>OG Chat</h1>
+    <p>Connect. Chat. Call.</p>
+    <p id="status">Connecting to OG Chat...</p>
+
+    <form id="join-form">
+        <label for="username">Username</label>
+        <input id="username" name="username" maxlength="24" required>
+        <label for="room">Room</label>
+        <input id="room" name="room" value="lobby">
+        <button type="submit">Join</button>
+    </form>
+
+    <h2>Users in room</h2>
+    <select id="users" size="4"></select>
+
+    <div>
+        <button id="call-button" type="button" disabled>Call User</button>
+        <button id="hangup-button" type="button" disabled>Hang Up</button>
+    </div>
+
+    <p id="call-status">No active call.</p>
+    <audio id="remote-audio" autoplay playsinline></audio>
+</body>
+</html>
