@@ -1,32 +1,27 @@
 import json
 import math
-import os
 import re
-import secrets
 import socket
 import threading
 import time
+import secrets
 
 HOST = "0.0.0.0"
-PORT = int(os.environ.get("PORT", 5000))  # Railway can set PORT; default 5000 on your PC
+PORT = 5000
 
 clients = {}
 strikes = {}  # username -> number of times they used blocked words
 mute_until = {}  # username -> time (seconds since epoch) when they can type again
+# UDP typing indicator
+session_tokens = {}  # username -> authentication token
+udp_clients = {}     # username -> UDP address
+
+udp_lock = threading.Lock()
 
 # Mute settings: strike 1 = 1 minute, strike 2 = 2 minutes, ... capped at 10 minutes
 MUTE_STEP_SECONDS = 60
 MAX_MUTE_SECONDS = 600
 clients_lock = threading.Lock()
-
-# ---------- UDP typing indicator ----------
-# Typing notices are tiny and unimportant if one is lost, which makes UDP a good fit:
-# no connection, no waiting for confirmation. If a client's UDP packets can't get through
-# (for example on Railway, which only offers a public TCP proxy), the same notice is
-# sent over the normal TCP connection instead.
-udp_sock = None
-udp_addrs = {}   # username -> (ip, port) of their registered UDP address
-udp_tokens = {}  # username -> secret token given at join, so nobody can fake a registration
 
 # ---------- Word filter ----------
 # Add or remove words here. Insults are included too.
@@ -36,24 +31,8 @@ BAD_WORDS = [
     "loser", "retard", "trash", "ugly", "fool",
 ]
 
-# Racist slurs and phrases. Add more here if you spot any that slip through.
-RACIST_WORDS = [
-    "nigger", "nigga", "niggaz", "chink", "gook", "spic", "wetback", "kike",
-    "coon", "darkie", "towelhead", "raghead", "beaner", "paki", "jap", "honky",
-    "zipperhead", "porch monkey", "sand nigger",
-    "go back to africa", "go back to your country",
-]
-
-BAD_WORDS = BAD_WORDS + RACIST_WORDS
-
-
-def _to_regex(word):
-    # Phrases: allow any amount of whitespace between the words
-    return r"\s+".join(re.escape(part) for part in word.split())
-
-
 _pattern = re.compile(
-    r"\b(" + "|".join(sorted(map(_to_regex, BAD_WORDS), key=len, reverse=True))
+    r"\b(" + "|".join(sorted(map(re.escape, BAD_WORDS), key=len, reverse=True))
     + r")(s|es|ed|er|ers|ing|in|y)?\b",
     re.IGNORECASE,
 )
@@ -100,63 +79,75 @@ def broadcast(message, exclude=None):
             except OSError:
                 pass
 
+def handle_udp(udp_socket):
+    print("[UDP] Typing indicator listening...")
 
-def send_udp(addr, message):
-    try:
-        udp_sock.sendto(json.dumps(message).encode("utf-8"), addr)
-    except (OSError, AttributeError):
-        pass
-
-
-def relay_typing(username, is_typing):
-    """Tell everyone else that username started or stopped typing."""
-    message = {"type": "typing", "from": username, "typing": is_typing}
-    with clients_lock:
-        targets = [(n, c, udp_addrs.get(n)) for n, c in clients.items() if n != username]
-    for _name, conn, udp_addr in targets:
-        if udp_addr:
-            send_udp(udp_addr, message)      # fast path: UDP
-        else:
-            try:
-                send_json(conn, message)     # fallback: normal TCP connection
-            except OSError:
-                pass
-
-
-def is_muted(username):
-    with clients_lock:
-        return mute_until.get(username, 0) > time.time()
-
-
-def udp_loop():
-    """Receives UDP datagrams: registrations and typing notices."""
     while True:
         try:
-            data, addr = udp_sock.recvfrom(2048)
-        except OSError:
-            break
-        try:
-            msg = json.loads(data.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            continue
-        if not isinstance(msg, dict):
-            continue
-        kind = msg.get("type")
-        name = str(msg.get("username", "")).strip()
+            data, address = udp_socket.recvfrom(2048)
 
-        with clients_lock:
-            known = name in clients
-            registered = udp_addrs.get(name)
-            token_ok = known and msg.get("token") == udp_tokens.get(name)
+            try:
+                msg = json.loads(data.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
 
-        if kind == "udp_hello" and token_ok:
-            with clients_lock:
-                udp_addrs[name] = addr
-            send_udp(addr, {"type": "udp_ok"})
-            print(f"[UDP] {name} registered {addr}")
-        elif kind == "typing" and known and registered == addr and not is_muted(name):
-            relay_typing(name, bool(msg.get("typing")))
+            kind = msg.get("type")
+            username = msg.get("username")
 
+            # Register a user's UDP connection
+            if kind == "udp_hello":
+                token = msg.get("token")
+
+                with clients_lock:
+                    valid = (
+                        username in clients
+                        and session_tokens.get(username) == token
+                    )
+
+                if not valid:
+                    continue
+
+                with udp_lock:
+                    udp_clients[username] = address
+
+                udp_socket.sendto(
+                    json.dumps({"type": "udp_ok"}).encode("utf-8"),
+                    address
+                )
+
+                print(f"[UDP] {username} registered")
+                continue
+
+            # Receive and forward typing status
+            if kind == "typing":
+                with udp_lock:
+                    registered = udp_clients.get(username)
+
+                    if registered != address:
+                        continue
+
+                    recipients = [
+                        (name, addr)
+                        for name, addr in udp_clients.items()
+                        if name != username
+                    ]
+
+                notification = {
+                    "type": "typing",
+                    "from": username,
+                    "typing": bool(msg.get("typing"))
+                }
+
+                payload = json.dumps(notification).encode("utf-8")
+
+                for _, recipient_address in recipients:
+                    try:
+                        udp_socket.sendto(payload, recipient_address)
+                    except OSError:
+                        pass
+
+        except OSError as error:
+            print(f"[UDP ERROR] {error}")
 
 def handle_client(conn, addr):
     username = None
@@ -192,10 +183,17 @@ def handle_client(conn, addr):
                     send_json(conn, {"type": "error", "text": "Username already taken"})
                     continue
                 username = name
-                token = secrets.token_hex(8)
+
+                token = secrets.token_hex(16)
+
                 with clients_lock:
-                    udp_tokens[username] = token
-                send_json(conn, {"type": "info", "text": f"Welcome, {username}!", "token": token})
+                    session_tokens[username] = token
+
+                send_json(conn, {
+                    "type": "info",
+                    "text": f"Welcome, {username}!",
+                    "token": token
+                })
                 left = math.ceil(mute_until.get(username, 0) - time.time())
                 if left > 0:
                     send_json(conn, {"type": "muted", "seconds": left,
@@ -204,12 +202,11 @@ def handle_client(conn, addr):
                 print(f"[JOINED] {username}")
 
             elif kind == "typing":
-                if not is_muted(username):
-                    relay_typing(username, bool(msg.get("typing")))
-
-            elif kind == "message":
-                clean, bad = censor(msg.get("text", ""))
-                now = time.time()
+                broadcast({
+                    "type": "typing",
+                    "from": username,
+                    "typing": bool(msg.get("typing"))
+                }, exclude=username)
 
                 with clients_lock:
                     was_muted = mute_until.get(username, 0) > now
@@ -259,42 +256,55 @@ def handle_client(conn, addr):
         if username:
             with clients_lock:
                 clients.pop(username, None)
-                udp_addrs.pop(username, None)
-                udp_tokens.pop(username, None)
-            relay_typing(username, False)
+                session_tokens.pop(username, None)
+
+            with udp_lock:
+                udp_clients.pop(username, None)
             broadcast({"type": "info", "text": f"{username} left the chat"})
             print(f"[LEFT] {username}")
         conn.close()
         print(f"[DISCONNECTED] {addr}")
 
-
 def main():
+    # TCP server
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen()
     server.settimeout(1.0)
 
-    # UDP socket on the same port number (TCP and UDP ports are separate, so this is allowed)
-    global udp_sock
-    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_sock.bind((HOST, PORT))
-    threading.Thread(target=udp_loop, daemon=True).start()
+    # UDP server
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_socket.bind((HOST, PORT))
 
-    print(f"[SERVER] Listening on port {PORT}... (press Ctrl+C to stop)")
-    print(f"[SERVER] UDP typing listener on port {PORT}")
+    threading.Thread(
+        target=handle_udp,
+        args=(udp_socket,),
+        daemon=True
+    ).start()
+
+    print(f"[TCP] Listening on port {PORT}")
+    print(f"[UDP] Listening on port {PORT}")
+
     try:
         while True:
             try:
                 conn, addr = server.accept()
             except socket.timeout:
                 continue
-            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+
+            threading.Thread(
+                target=handle_client,
+                args=(conn, addr),
+                daemon=True
+            ).start()
+
     except KeyboardInterrupt:
         print("\n[SERVER] Shutting down.")
+
     finally:
         server.close()
-        udp_sock.close()
+        udp_socket.close()
 
 
 if __name__ == "__main__":
