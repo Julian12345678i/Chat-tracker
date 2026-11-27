@@ -1,0 +1,50 @@
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0f1115; color: #e8eaed;
+    display: flex; flex-direction: column;
+}
+header { display: flex; align-items: baseline; gap: 12px; padding: 10px 16px; background: #171a21; border-bottom: 1px solid #262b36; }
+h1 { margin: 0; font-size: 20px; }
+h2 { margin: 0 0 8px; font-size: 14px; text-transform: uppercase; color: #8b93a3; }
+#status { font-size: 13px; color: #8b93a3; }
+button { background: #4f8cff; color: #fff; border: 0; border-radius: 8px; padding: 9px 14px; font-size: 14px; cursor: pointer; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.secondary { background: #2a3040; }
+button.danger { background: #e5484d; }
+input { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #2f3646; background: #12151b; color: inherit; font-size: 15px; }
+label { display: block; margin: 12px 0 4px; font-size: 13px; color: #8b93a3; }
+
+#join-screen { flex: 1; display: grid; place-items: center; padding: 16px; }
+#join-form { width: 100%; max-width: 360px; background: #171a21; padding: 20px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px; }
+#join-form button { margin-top: 10px; }
+.tagline { margin: 0 0 4px; color: #8b93a3; }
+
+main { flex: 1; min-height: 0; display: flex; }
+aside { width: 220px; padding: 12px; background: #141720; border-right: 1px solid #262b36; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
+#users { list-style: none; margin: 0; padding: 0; flex: 1; }
+#users li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border-radius: 8px; word-break: break-all; }
+#users li:hover { background: #1d2230; }
+#users button { padding: 6px 10px; font-size: 13px; }
+
+#chat { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#messages { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.msg { max-width: 75%; padding: 8px 12px; border-radius: 12px; background: #1d2230; overflow-wrap: anywhere; }
+.msg.me { align-self: flex-end; background: #2f5fc4; }
+.msg .who { display: block; font-size: 12px; color: #9fb4e8; margin-bottom: 2px; }
+.sys { align-self: center; font-size: 12px; color: #8b93a3; }
+#typing { height: 20px; padding: 0 14px; font-size: 12px; color: #8b93a3; }
+#message-form { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid #262b36; }
+
+#call-bar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: #1f6f43; }
+#call-bar span { flex: 1; }
+#incoming { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: grid; place-items: center; z-index: 10; }
+.incoming-box { background: #171a21; padding: 24px; border-radius: 14px; text-align: center; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; max-width: 90vw; }
+.incoming-box p { width: 100%; margin: 0 0 8px; font-size: 18px; }
+[hidden] { display: none !important; }
+
+@media (max-width: 640px) {
+    main { flex-direction: column; }
+    aside { width: 100%; max-height: 35%; border-right: 0; border-bottom: 1px solid #262b36; }
+}
